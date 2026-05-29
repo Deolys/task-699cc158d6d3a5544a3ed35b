@@ -10,14 +10,13 @@ load_dotenv()
 # Define a simple tool that returns a price for a product in a city
 async def get_price(product: str, city: str) -> str:
     """Mock function to simulate fetching a product price."""
-    # In a real scenario this would query an API or database.
     prices = {
         ("молоко", "Казань"): 89,
         ("хлеб", "Казань"): 35,
         ("чай", "Москва"): 120,
     }
     key = (product, city)
-    price = prices.get(key, None)
+    price = prices.get(key)
     if price is None:
         return f"Цена для {product} в городе {city} не найдена."
     return f"{price} руб."
@@ -27,7 +26,6 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 # Define the agent graph
 def main_agent() -> StateGraph:
-    # The state will contain a list of messages
     def add_message(state: Dict[str, List], message) -> Dict[str, List]:
         state["messages"].append(message)
         return state
@@ -62,7 +60,6 @@ def format_chunk_message(chunk):
 def format_message(message) -> str:
     if message.content:
         return message.content
-    # If the message is a tool call, display it nicely
     tool_call = message.tool_calls[0]
     name = tool_call.get("name")
     args = tool_call.get("args")

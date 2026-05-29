@@ -1,67 +1,67 @@
-from langchain import hub
-from langchain_openai import ChatOpenAI
-from langchain.tools import tool
 import os
+from langchain_openai import ChatOpenAI
+from langchain.agents import initialize_agent, Tool, AgentType
 
-# Simple price lookup tool – in a real project this would query an API or database.
-@tool("get_price", "Return the price of a product in a given city")
-def get_price(product: str, city: str) -> str:
-    # Dummy data for demonstration purposes
-    prices = {
-        ("молоко", "Казань"): 89,
-        ("хлеб", "Казань"): 45,
-        ("яблоки", "Москва"): 120,
-    }
-    key = (product, city)
-    price = prices.get(key, None)
-    if price is None:
-        return f"Цена для {product} в городе {city} не найдена."
-    return f"{price} руб." 
+# Define a simple echo tool that will be called by the agent
 
-# LLM configuration – use your own OpenAI key via environment variable OPENAI_API_KEY
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+def echo_function(input_text: str) -> str:
+    """Return the input text prefixed with 'Echo:'"""
+    return f"Echo: {input_text}"
 
-# Build the agent with function calling enabled
-agent = llm.bind_tools([get_price])
+echo_tool = Tool(
+    name="echo",
+    description="Echoes back the provided input.",
+    func=echo_function,
+)
 
-# Example prompt – replace with actual user query if needed
-prompt = {
-    "messages": [
-        {"role": "human", "content": "Покажи цены на молоко и хлеб в Казани."}
-    ]
-}
+# Initialize LLM with streaming enabled
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0, streaming=True)
 
-# Stream the response
-stream = agent.stream(prompt, stream_mode=["messages", "updates"])
+# Create an agent executor that can use tools via OpenAI function calling
+agent_executor = initialize_agent(
+    [echo_tool],
+    llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=False,
+)
 
-step = 1
+# Helper to format messages from the stream
+step_counter = 1
 
 def format_chunk_message(chunk):
+    global step_counter
     message, meta = chunk
-    global step
-    if meta.get("langgraph_step") != step:
-        step = meta["langgraph_step"]
+    if meta.get("langgraph_step") != step_counter:
+        step_counter = meta["langgraph_step"]
         print("\n --- --- --- \n")
     if message.content:
         print(message.content, end="", flush=True)
 
+# Helper to format a finished message (used for tool calls)
 def format_message(message):
     if message.content:
         return message.content
-    # If the tool call is finished, display it as a function call string
-    if message.tool_calls and len(message.tool_calls) > 0:
+    # If the message contains a tool call, display it nicely
+    if hasattr(message, "tool_calls") and message.tool_calls:
         tc = message.tool_calls[0]
-        return f"{tc['name']}({tc['args']})"
+        return f"{tc.name}({tc.args})"
     return ""
 
-for chunk in stream:
-    chunk_type, chunk_data = chunk
-    if chunk_type == "messages":
-        format_chunk_message(chunk_data)
-    elif chunk_type == "updates":
-        # When the model finishes a step and may have called a tool
-        if chunk_data.get("model"):
-            last_msg = chunk_data["model"]["messages"][-1]
-            print(format_message(last_msg))
+if __name__ == "__main__":
+    # Example user prompt that will trigger the echo tool
+    user_prompt = "Hello, world!"
+    stream = agent_executor.stream(
+        {"input": user_prompt},
+        stream_mode=["messages", "updates"],
+    )
 
-print("\n--- Finished ---")
+    for chunk in stream:
+        chunk_type, chunk_data = chunk
+        if chunk_type == "messages":
+            format_chunk_message(chunk_data)
+        elif chunk_type == "updates":
+            # When the model finishes a step and may have called a tool
+            if chunk_data.get("model"):
+                last_msg = chunk_data["model"]["messages"][-1]
+                print(format_message(last_msg))
+    print()  # Ensure final newline

@@ -1,91 +1,81 @@
 import os
-from langgraph import Graph, State, ToolNode
-from langgraph.tools import tool
-from openai import OpenAI
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 
-# 1. Set up the OpenAI client (use environment variable for API key)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# 1. Define a simple tool that simulates an API call
 
-# 2. Define a simple tool that returns a price lookup – in real life this would call an external service.
-@tool
 def get_price(product: str, city: str) -> str:
-    """Return a mock price for a product in a given city."""
+    """Mock function to return price for a product in a city."""
     prices = {
-        ("молоко", "Казань"): "89",
-        ("хлеб", "Казань"): "35",
-        ("сахар", "Казань"): "45",
+        ("молоко", "Казань"): 89,
+        ("хлеб", "Казань"): 45,
     }
     key = (product, city)
-    price = prices.get(key, "неизвестно")
-    return f"{price} руб."
+    price = prices.get(key, 0)
+    return f"{price}"
 
-# 3. Create a simple state that holds the conversation history.
-class AgentState(State):
-    messages: list[dict]
+# 2. Create a tool node for the agent
+get_price_node = ToolNode(get_price)
 
-# 4. Build the graph – a single node that calls the LLM and may invoke tools.
-async def llm_node(state: AgentState) -> AgentState:
-    # Prepare messages for the model
-    chat_messages = [
-        {"role": msg.get("role", "assistant"), "content": msg["content"]}
-        for msg in state.messages
-    ]
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=chat_messages,
-        stream=True,
+# 3. Define the graph state and nodes
+def main() -> None:
+    # LLM configuration – use environment variable for API key
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=os.getenv("OPENAI_API_KEY"))
+
+    # Graph definition
+    graph = StateGraph()
+    graph.add_node("agent", lambda state: llm.invoke(state["messages"]))
+    graph.add_node("get_price", get_price_node)
+
+    # Define transitions
+    def agent_to_next(state):
+        last_message = state["messages"][-1]
+        if last_message.tool_calls:
+            return "get_price"
+        return END
+
+    graph.set_entry_point("agent")
+    graph.add_edge("agent", "get_price", condition=agent_to_next)
+    graph.add_edge("get_price", "agent")
+
+    # Compile the graph with a memory saver for streaming
+    app = graph.compile(checkpointer=MemorySaver())
+
+    # 4. Stream the response
+    stream = app.stream(
+        {"messages": [{"role": "human", "content": "Покажи цену молока и хлеба в Казани."}]},
+        stream_mode=["messages", "updates"],
     )
-    # Yield tokens as they arrive
-    async for chunk in response:
-        if chunk.choices[0].delta.content is not None:
-            yield {"role": "assistant", "content": chunk.choices[0].delta.content}
-        elif chunk.choices[0].delta.tool_calls:
-            # When a tool call starts, forward the whole tool call object
-            yield {"role": "assistant", "tool_calls": chunk.choices[0].delta.tool_calls}
-    return state
-
-# 5. Assemble the graph with a single LLM node and the get_price tool.
-graph = Graph(
-    nodes={
-        "llm": llm_node,
-        "get_price": ToolNode(get_price),
-    },
-    edges=[("llm", "get_price"), ("get_price", "llm")],
-)
-
-# 6. Helper to format messages for printing.
-def format_message(msg: dict) -> str:
-    if msg.get("content"):
-        return msg["content"]
-    # tool call representation
-    tc = msg.get("tool_calls", [{}])[0]
-    name = tc.get("name", "unknown_tool")
-    args = tc.get("args", {})
-    return f"{name}({args})"
-
-# 7. Main entry point – stream the conversation.
-if __name__ == "__main__":
-    # Initial user prompt
-    user_prompt = "Покажи цены на молоко и хлеб в Казани."
-    state = AgentState(messages=[{"role": "user", "content": user_prompt}])
-
-    stream = graph.stream(state, stream_mode=["messages", "updates"])
 
     step = 1
-    for chunk_type, chunk_data in stream:
+
+    def format_chunk_message(chunk):
+        nonlocal step
+        message, meta = chunk
+        if meta["langgraph_step"] != step:
+            step = meta["langgraph_step"]
+            print("\n --- --- --- \n")
+        if message.content:
+            print(message.content, end="", flush=True)
+
+    def format_message(message):
+        if message.content:
+            return message.content
+        # Assume single tool call for simplicity
+        name = message.tool_calls[0]["name"]
+        args = message.tool_calls[0]["args"]
+        return f"{name}({args})"
+
+    for chunk in stream:
+        chunk_type, chunk_data = chunk
         if chunk_type == "messages":
-            message, meta = chunk_data
-            # Detect step change
-            current_step = meta.get("langgraph_step") or 0
-            if current_step != step:
-                step = current_step
-                print("\n --- --- --- \n")
-            if message.get("content"):
-                print(message["content"], end="", flush=True)
+            format_chunk_message(chunk_data)
         elif chunk_type == "updates":
-            # When the model finishes a turn, we may want to show tool calls.
             if chunk_data.get("model"):
                 last_msg = chunk_data["model"]["messages"][-1]
                 print(format_message(last_msg))
 
-    print("\n--- Конец диалога ---")
+if __name__ == "__main__":
+    main()

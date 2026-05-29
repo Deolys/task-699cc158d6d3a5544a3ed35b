@@ -1,67 +1,76 @@
 import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
-from langchain.agents import initialize_agent, Tool, AgentType
+from langgraph.graph import StateGraph, END
+from typing import Dict, Any
 
-# Define a simple echo tool that will be called by the agent
+# Load environment variables (e.g., OPENAI_API_KEY)
+load_dotenv()
 
-def echo_function(input_text: str) -> str:
-    """Return the input text prefixed with 'Echo:'"""
-    return f"Echo: {input_text}"
+# Define a simple tool that simulates price lookup
+async def get_price(product: str, city: str) -> str:
+    """Mock function to return a price table for a product in a city."""
+    # In a real scenario this would query an API or database.
+    prices = {
+        "молоко": {"Казань": 89, "Москва": 95},
+        "хлеб": {"Казань": 30, "Москва": 35},
+    }
+    price = prices.get(product, {}).get(city, "неизвестно")
+    return f"| Продукт | Цена (руб.) | Магазин |
+| {product} | {price} | Магнит |"
 
-echo_tool = Tool(
-    name="echo",
-    description="Echoes back the provided input.",
-    func=echo_function,
+# Create the LLM instance
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+
+# Define the agent graph
+def main_agent() -> StateGraph:
+    # The state will just hold messages
+    def add_messages(state: Dict[str, Any]):
+        return state
+
+    graph = StateGraph(add_messages)
+    graph.add_node("agent", llm)
+    graph.set_entry_point("agent")
+    graph.add_edge("agent", END)
+    return graph.compile()
+
+# Instantiate the agent
+agent = main_agent()
+
+# Stream the response
+stream = agent.stream(
+    {"messages": [{"role": "human", "content": "Покажи цену молока в Казани и хлеба."}]},
+    stream_mode=["messages", "updates"]
 )
 
-# Initialize LLM with streaming enabled
-llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0, streaming=True)
-
-# Create an agent executor that can use tools via OpenAI function calling
-agent_executor = initialize_agent(
-    [echo_tool],
-    llm,
-    agent=AgentType.OPENAI_FUNCTIONS,
-    verbose=False,
-)
-
-# Helper to format messages from the stream
-step_counter = 1
+step = 1
 
 def format_chunk_message(chunk):
-    global step_counter
     message, meta = chunk
-    if meta.get("langgraph_step") != step_counter:
-        step_counter = meta["langgraph_step"]
+    global step
+    if meta.get("langgraph_step") != step:
+        step = meta["langgraph_step"]
         print("\n --- --- --- \n")
     if message.content:
         print(message.content, end="", flush=True)
 
-# Helper to format a finished message (used for tool calls)
+# Helper to format final messages (tool calls)
 def format_message(message):
     if message.content:
         return message.content
-    # If the message contains a tool call, display it nicely
-    if hasattr(message, "tool_calls") and message.tool_calls:
-        tc = message.tool_calls[0]
-        return f"{tc.name}({tc.args})"
-    return ""
+    # Assume single tool call for simplicity
+    tc = message.tool_calls[0]
+    name = tc["name"]
+    args = tc["args"]
+    return f"{name}({args})"
 
-if __name__ == "__main__":
-    # Example user prompt that will trigger the echo tool
-    user_prompt = "Hello, world!"
-    stream = agent_executor.stream(
-        {"input": user_prompt},
-        stream_mode=["messages", "updates"],
-    )
+for chunk in stream:
+    chunk_type, chunk_data = chunk
+    if chunk_type == "messages":
+        format_chunk_message(chunk_data)
+    elif chunk_type == "updates":
+        if chunk_data.get("model"):
+            last_msg = chunk_data["model"]["messages"][-1]
+            print(format_message(last_msg))
 
-    for chunk in stream:
-        chunk_type, chunk_data = chunk
-        if chunk_type == "messages":
-            format_chunk_message(chunk_data)
-        elif chunk_type == "updates":
-            # When the model finishes a step and may have called a tool
-            if chunk_data.get("model"):
-                last_msg = chunk_data["model"]["messages"][-1]
-                print(format_message(last_msg))
-    print()  # Ensure final newline
+print("\n--- Завершено ---")
